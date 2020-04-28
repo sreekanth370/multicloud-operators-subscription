@@ -21,6 +21,7 @@ import (
 
 	"github.com/ghodss/yaml"
 	"github.com/onsi/gomega"
+	dplv1 "github.com/open-cluster-management/multicloud-operators-deployable/pkg/apis/apps/v1"
 	appv1 "github.com/open-cluster-management/multicloud-operators-subscription/pkg/apis/apps/v1"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 )
@@ -159,4 +160,40 @@ func TestUpdateSubscriptionToTarget(t *testing.T) {
 
 	err = c.Delete(context.TODO(), targetsub)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
+}
+
+func TestCheckSubDeployablest(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	dplStr := `apiVersion: apps.open-cluster-management.io/v1
+kind: Deployable
+metadata:
+  annotations:
+    apps.open-cluster-management.io/is-local-deployable: "false"
+  name: sample-cr-configmap
+  namespace: dev2
+spec:
+  template:
+    apiVersion: v1
+    kind: ConfigMap
+    metadata:
+      name: testconfigmap
+      namespace: default
+    data:
+      purpose: for test`
+
+	dpl := &dplv1.Deployable{}
+
+	err := yaml.Unmarshal([]byte(dplStr), &dpl)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	found := dpl.DeepCopy()
+
+	// Two deployables are the same. Return false (no update required)
+	ret := checkSubDeployables(found, dpl)
+	g.Expect(ret).To(gomega.BeFalse())
+
+	overrides := &dplv1.Overrides{}
+	override.ClusterName = "test1"
+	found.Spec.Overrides = override
 }
