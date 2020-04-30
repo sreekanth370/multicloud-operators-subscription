@@ -17,7 +17,7 @@ spec:
       serviceAccountName: multicloud-operators
       containers:
         - name: multicloud-operators-subscription
-          image: quay.io/multicloudlab/multicloud-operators-subscription
+          image: quay.io/open-cluster-management/multicluster-operators-subscription:community-latest
           ports:
           - containerPort: 8443
           command:
