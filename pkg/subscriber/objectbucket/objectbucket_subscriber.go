@@ -123,7 +123,7 @@ func (obs *Subscriber) UnsubscribeItem(key types.NamespacedName) error {
 		delete(obs.itemmap, key)
 
 		if err := obs.synchronizer.CleanupByHost(key, objectbucketsyncsource+key.String()); err != nil {
-			klog.Errorf("failed to nusubscribe %v, err: %v", key.String(), err)
+			klog.Errorf("failed to unsubscribe %v, err: %v", key.String(), err)
 			return err
 		}
 	}

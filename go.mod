@@ -22,7 +22,6 @@ require (
 	github.com/gorilla/handlers v1.4.0 // indirect
 	github.com/imdario/mergo v0.3.8 // indirect
 	github.com/johannesboyne/gofakes3 v0.0.0-20200218152459-de0855a40bc1
-	github.com/mattn/go-colorable v0.1.4 // indirect
 	github.com/onsi/ginkgo v1.12.0
 	github.com/onsi/gomega v1.9.0
 	github.com/open-cluster-management/multicloud-operators-channel v1.0.0-2020-05-12-22-38-29.0.20200514134758-a7e10a29ec07

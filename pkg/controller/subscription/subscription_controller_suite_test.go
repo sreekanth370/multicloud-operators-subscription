@@ -98,6 +98,7 @@ func spyReconciler(mgr manager.Manager, hubclient client.Client, subscribers map
 		hubclient:   hubclient,
 		subscribers: subscribers,
 		clk:         clk,
+		deleteResources: true,
 	}
 
 	return rec

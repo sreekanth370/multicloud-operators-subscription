@@ -422,6 +422,20 @@ func GetPauseLabel(instance *appv1.Subscription) bool {
 	return false
 }
 
+// GetDeleteResourcesLabel check if the subscription-pause label exists
+func GetDeleteResourcesLabel(instance *appv1.Subscription) bool {
+	labels := instance.GetLabels()
+	if labels == nil {
+		labels = make(map[string]string)
+	}
+
+	if labels[appv1.LabelSubscriptionDeleteResources] != "" && strings.EqualFold(labels[appv1.LabelSubscriptionDeleteResources], "false") {
+		return false
+	}
+
+	return true	// The default is to delete resources
+}
+
 //DeleteSubscriptionCRD deletes the Subscription CRD
 func DeleteSubscriptionCRD(runtimeClient client.Client, crdx *clientsetx.Clientset) {
 	sublist := &appv1.SubscriptionList{}

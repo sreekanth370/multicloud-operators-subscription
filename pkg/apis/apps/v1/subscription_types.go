@@ -58,6 +58,8 @@ var (
 	AnnotationGitCommit = SchemeGroupVersion.Group + "/git-commit"
 	//LabelSubscriptionPause sits in subscription label to identify if the subscription is paused or not
 	LabelSubscriptionPause = "subscription-pause"
+	//LabelSubscriptionDeleteResources sits in subscription label to identify if the subscription should delete the resources it created
+	LabelSubscriptionDeleteResources = "subscription-delete-resources"
 	//LabelSubscriptionName is the subscription name
 	LabelSubscriptionName = SchemeGroupVersion.Group + "/subscription"
 )

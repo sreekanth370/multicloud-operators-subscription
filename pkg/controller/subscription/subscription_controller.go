@@ -91,6 +91,7 @@ func newReconciler(mgr manager.Manager, hubclient client.Client, subscribers map
 		hubclient:   hubclient,
 		subscribers: subscribers,
 		clk:         time.Now,
+		deleteResources: true,
 	}
 
 	return rec
@@ -127,6 +128,7 @@ type ReconcileSubscription struct {
 	scheme      *runtime.Scheme
 	subscribers map[string]appv1alpha1.Subscriber
 	clk         clock
+	deleteResources bool
 }
 
 // Reconcile reads that state of the cluster for a Subscription object and makes changes based on the state read
@@ -168,7 +170,10 @@ func (r *ReconcileSubscription) Reconcile(request reconcile.Request) (reconcile.
 		return reconcile.Result{}, err
 	}
 
-	// if the subscription pause lable is true, stop subscription here.
+	// Just update the value, we accept the cost vs a if-then set r.deleteResources
+	r.deleteResources = subutil.GetDeleteResourcesLabel(instance)
+	
+	// if the subscription pause label is true, stop subscription here.
 	if subutil.GetPauseLabel(instance) {
 		klog.Info("Subscription: ", request.NamespacedName, " is paused")
 		return reconcile.Result{}, nil

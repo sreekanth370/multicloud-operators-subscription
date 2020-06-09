@@ -335,7 +335,7 @@ func setFoundDplAnnotation(found, dpl, targetDpl *dplv1alpha1.Deployable, update
 	return foundanno
 }
 
-//updateDplLabel update found dpl label subacription-pause
+//updateDplLabels update found dpl label subacription-*
 func setFoundDplLabel(found *dplv1alpha1.Deployable, sub *appv1alpha1.Subscription) {
 	label := found.GetLabels()
 	if label == nil {
@@ -349,10 +349,17 @@ func setFoundDplLabel(found *dplv1alpha1.Deployable, sub *appv1alpha1.Subscripti
 
 	label[dplv1alpha1.LabelSubscriptionPause] = labelPause
 
+	labelDeleteResources := "true"
+	if !subutil.GetDeleteResourcesLabel(sub) {
+		labelDeleteResources = "false"
+	}
+
+	label[dplv1alpha1.LabelSubscriptionDeleteResources] = labelDeleteResources
+
 	found.SetLabels(label)
 }
 
-//setSuscriptionLabel update subscription labels. for now only set subacription-pause label
+//setSuscriptionLabel update subscription labels. for now set subacription-* label
 func setSuscriptionLabel(sub *appv1alpha1.Subscription) {
 	label := sub.GetLabels()
 	if label == nil {
@@ -365,6 +372,13 @@ func setSuscriptionLabel(sub *appv1alpha1.Subscription) {
 	}
 
 	label[dplv1alpha1.LabelSubscriptionPause] = labelPause
+
+	labelDeleteResources := "true"
+	if !subutil.GetDeleteResourcesLabel(sub) {
+		labelDeleteResources = "false"
+	}
+
+	label[dplv1alpha1.LabelSubscriptionDeleteResources] = labelDeleteResources
 
 	sub.SetLabels(label)
 }
@@ -700,7 +714,13 @@ func (r *ReconcileSubscription) prepareDeployableForSubscription(sub, rootSub *a
 	if subutil.GetPauseLabel(sub) {
 		labelPause = "true"
 	}
+	
+	labelDeleteResources := "true"
+	if !subutil.GetDeleteResourcesLabel(sub) {
+		labelDeleteResources = "false"
+	}
 
+	label[dplv1alpha1.LabelSubscriptionDeleteResources] = labelDeleteResources
 	dpl := &dplv1alpha1.Deployable{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "Deployable",
@@ -711,6 +731,7 @@ func (r *ReconcileSubscription) prepareDeployableForSubscription(sub, rootSub *a
 			Namespace: sub.Namespace,
 			Labels: map[string]string{
 				dplv1alpha1.LabelSubscriptionPause: labelPause,
+				dplv1alpha1.LabelSubscriptionDeleteResources: labelDeleteResources,
 			},
 			Annotations: map[string]string{
 				dplv1alpha1.AnnotationLocal:       "false",
