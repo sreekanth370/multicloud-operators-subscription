@@ -382,11 +382,11 @@ func sortKubeResource(crdsAndNamespaceFiles, rbacFiles, otherFiles []string, pat
 					crdsAndNamespaceFiles = append(crdsAndNamespaceFiles, path)
 				} else if strings.EqualFold(t.Kind, "namespace") {
 					crdsAndNamespaceFiles = append(crdsAndNamespaceFiles, path)
-				} else if strings.EqualFold(t.Kind, "serviceaccount") {
-					rbacFiles = append(rbacFiles, path)
-				} else if strings.EqualFold(t.Kind, "clusterrole") {
-					rbacFiles = append(rbacFiles, path)
-				} else if strings.EqualFold(t.Kind, "role") {
+				} else if strings.EqualFold(t.Kind, "serviceaccount") ||
+					strings.EqualFold(t.Kind, "clusterrole") ||
+					strings.EqualFold(t.Kind, "role") ||
+					strings.EqualFold(t.Kind, "clusterrolebinding") ||
+					strings.EqualFold(t.Kind, "rolebinding") {
 					rbacFiles = append(rbacFiles, path)
 				} else {
 					otherFiles = append(otherFiles, path)
@@ -482,7 +482,7 @@ func matchUserSubAdmin(client client.Client, userIdentity, userGroups string) bo
 	err := client.Get(context.TODO(), types.NamespacedName{Name: appv1.SubscriptionAdmin}, foundClusterRoleBinding)
 
 	if err == nil {
-		klog.Info("ClusterRoleBinding subscription-admin found.")
+		klog.Info("ClusterRoleBinding acm-subscription-admin found.")
 
 		for _, subject := range foundClusterRoleBinding.Subjects {
 			if strings.Trim(subject.Name, "") == strings.Trim(userIdentity, "") && strings.Trim(subject.Kind, "") == "User" {
@@ -503,6 +503,8 @@ func matchUserSubAdmin(client client.Client, userIdentity, userGroups string) bo
 	} else {
 		klog.Error(err)
 	}
+
+	foundClusterRoleBinding = nil
 
 	return isUserSubAdmin
 }

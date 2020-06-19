@@ -97,7 +97,7 @@ func (sync *KubeSynchronizer) checkServerObjects(gvk schema.GroupVersionKind, re
 			klog.V(4).Info("Found for ", dpl, ", tplunit:", tplunit, "Doing obj ", obj.GetNamespace(), "/", obj.GetName(), " with status:", status)
 			delete(obj.Object, "status")
 
-			err = sync.Extension.UpdateHostStatus(err, tplunit.Unstructured, status)
+			err = sync.Extension.UpdateHostStatus(err, tplunit.Unstructured, status, false)
 
 			if err != nil {
 				klog.Error("Failed to update host status with error:", err)
@@ -200,9 +200,9 @@ func (sync *KubeSynchronizer) createNewResourceByTemplateUnit(ri dynamic.Resourc
 	tplunit.ResourceUpdated = true
 
 	if obj != nil {
-		err = sync.Extension.UpdateHostStatus(err, tplunit.Unstructured, obj.Object["status"])
+		err = sync.Extension.UpdateHostStatus(err, tplunit.Unstructured, obj.Object["status"], false)
 	} else {
-		err = sync.Extension.UpdateHostStatus(err, tplunit.Unstructured, nil)
+		err = sync.Extension.UpdateHostStatus(err, tplunit.Unstructured, nil, false)
 	}
 
 	if err != nil {
@@ -223,7 +223,7 @@ func (sync *KubeSynchronizer) updateResourceByTemplateUnit(ri dynamic.ResourceIn
 
 		tplunit.ResourceUpdated = false
 
-		err = sync.Extension.UpdateHostStatus(errors.NewBadRequest(errmsg), tplunit.Unstructured, nil)
+		err = sync.Extension.UpdateHostStatus(errors.NewBadRequest(errmsg), tplunit.Unstructured, nil, false)
 
 		if err != nil {
 			klog.Error("Failed to update host status for existing resource with error:", err)
@@ -275,7 +275,7 @@ func (sync *KubeSynchronizer) updateResourceByTemplateUnit(ri dynamic.ResourceIn
 		klog.Error("Failed to update resource with error:", err)
 	}
 
-	sterr := sync.Extension.UpdateHostStatus(err, tplunit.Unstructured, obj.Object["status"])
+	sterr := sync.Extension.UpdateHostStatus(err, tplunit.Unstructured, obj.Object["status"], false)
 
 	if sterr != nil {
 		klog.Error("Failed to update host status with error:", err)
@@ -385,7 +385,7 @@ func (sync *KubeSynchronizer) DeRegisterTemplate(host, dpl types.NamespacedName,
 						klog.Error("Failed to delete tplunit in kubernetes, with error:", err)
 					}
 
-					sterr := sync.Extension.UpdateHostStatus(err, tplunit.Unstructured, nil)
+					sterr := sync.Extension.UpdateHostStatus(err, tplunit.Unstructured, nil, true)
 
 					if sterr != nil {
 						klog.Error("Failed to update host status, with error:", err)
@@ -549,13 +549,8 @@ func (sync *KubeSynchronizer) RegisterTemplate(host types.NamespacedName, instan
 		}
 	}
 
-	klog.V(4).Info("overrided template: ", template)
+	klog.V(4).Info("overrode template: ", template)
 	// skip no-op to template
-
-	if existingTemplateUnit != nil && reflect.DeepEqual(existingTemplateUnit.Unstructured, template) {
-		klog.V(2).Info("Skipping.. template in registry is the same ", existingTemplateUnit)
-		return nil
-	}
 
 	templateUnit := &TemplateUnit{
 		ResourceUpdated: false,

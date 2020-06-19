@@ -116,6 +116,29 @@ var (
 		Subscription: githubsub,
 		Channel:      githubchn,
 	}
+	bitbucketsharedkey = types.NamespacedName{
+		Name:      "bitbuckettest",
+		Namespace: "default",
+	}
+	bitbucketchn = &chnv1alpha1.Channel{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      bitbucketsharedkey.Name,
+			Namespace: bitbucketsharedkey.Namespace,
+		},
+		Spec: chnv1alpha1.ChannelSpec{
+			Type:     "Git",
+			Pathname: "https://bitbucket.org/ekdjbdfh/testrepo.git",
+		},
+	}
+	bitbucketsub = &appv1alpha1.Subscription{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      bitbucketsharedkey.Name,
+			Namespace: bitbucketsharedkey.Namespace,
+		},
+		Spec: appv1alpha1.SubscriptionSpec{
+			Channel: bitbucketsharedkey.String(),
+		},
+	}
 )
 
 var _ = Describe("github subscriber reconcile logic", func() {
@@ -208,6 +231,28 @@ var _ = Describe("github subscriber reconcile logic", func() {
 	})
 })
 
+var _ = Describe("test subscribing to bitbucket repository", func() {
+	It("should be able to clone the bitbucket repo and sort resources", func() {
+		subitem := &SubscriberItem{}
+		subitem.Subscription = bitbucketsub
+		subitem.Channel = bitbucketchn
+		subitem.synchronizer = defaultSubscriber.synchronizer
+		commitid, err := subitem.cloneGitRepo()
+		Expect(commitid).ToNot(Equal(""))
+		Expect(err).NotTo(HaveOccurred())
+
+		err = subitem.sortClonedGitRepo()
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(len(subitem.indexFile.Entries)).To(Equal(3))
+
+		Expect(len(subitem.crdsAndNamespaceFiles)).To(Equal(2))
+		Expect(len(subitem.rbacFiles)).To(Equal(3))
+		Expect(len(subitem.otherFiles)).To(Equal(2))
+		Expect(subitem.crdsAndNamespaceFiles[0]).To(ContainSubstring("resources/deploy/crds/crontab.yaml"))
+	})
+})
+
 var _ = Describe("test subscribe invalid resource", func() {
 	It("should not return error or panic", func() {
 		subitem := &SubscriberItem{}
@@ -215,10 +260,8 @@ var _ = Describe("test subscribe invalid resource", func() {
 		subitem.Channel = githubchn
 		subitem.synchronizer = defaultSubscriber.synchronizer
 
-		pkgMap := make(map[string]bool)
-
 		// Test subscribing an invalid kubernetes resource
-		_, _, err := subitem.subscribeResource([]byte(invalidRsc), pkgMap)
+		_, _, err := subitem.subscribeResource([]byte(invalidRsc))
 		Expect(err).To(HaveOccurred())
 
 	})

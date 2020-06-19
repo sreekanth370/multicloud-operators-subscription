@@ -74,9 +74,9 @@ type SubscriberItem struct {
 	synchronizer          SyncSource
 	chartDirs             map[string]string
 	kustomizeDirs         map[string]string
+	resources             []kubesynchronizer.DplUnit
 	indexFile             *repo.IndexFile
 	webhookEnabled        bool
-	successful            bool
 	clusterAdmin          bool
 }
 
@@ -112,7 +112,6 @@ func (ghsi *SubscriberItem) Start() {
 		err := ghsi.doSubscription()
 		if err != nil {
 			klog.Error(err, "Subscription error.")
-			ghsi.successful = false
 		}
 	}, time.Duration(ghsi.syncinterval)*time.Second, ghsi.stopch)
 }
@@ -124,8 +123,8 @@ func (ghsi *SubscriberItem) Stop() {
 }
 
 func (ghsi *SubscriberItem) doSubscription() error {
-	// If webhook is enabled and successful, don't do anything until next reconcilitation.
-	if ghsi.webhookEnabled && ghsi.successful {
+	// If webhook is enabled, don't do anything until next reconcilitation.
+	if ghsi.webhookEnabled {
 		return nil
 	}
 
@@ -137,90 +136,77 @@ func (ghsi *SubscriberItem) doSubscription() error {
 		return err
 	}
 
-	if commitID != ghsi.commitID || !ghsi.successful {
-		klog.V(2).Info("The commit ID is different or subscription failed previously. Process the cloned repo")
+	klog.Info("Git commit: ", commitID)
 
-		err := ghsi.sortClonedGitRepo()
-		if err != nil {
-			klog.Error(err, "Unable to sort helm charts and kubernetes resources from the cloned git repo.")
-			return err
-		}
+	ghsi.resources = []kubesynchronizer.DplUnit{}
 
-		hostkey := types.NamespacedName{Name: ghsi.Subscription.Name, Namespace: ghsi.Subscription.Namespace}
-		syncsource := githubk8ssyncsource + hostkey.String()
-		rscPkgMap := make(map[string]bool)
-
-		klog.V(4).Info("Applying resources: ", ghsi.crdsAndNamespaceFiles)
-
-		ghsi.successful = true
-
-		err = ghsi.subscribeResources(hostkey, syncsource, nil, rscPkgMap, ghsi.crdsAndNamespaceFiles)
-
-		if err != nil {
-			klog.Error(err, "Unable to subscribe crd and ns resources")
-
-			ghsi.successful = false
-		}
-
-		klog.V(4).Info("Applying resources: ", ghsi.rbacFiles)
-
-		err = ghsi.subscribeResources(hostkey, syncsource, nil, rscPkgMap, ghsi.rbacFiles)
-
-		if err != nil {
-			klog.Error(err, "Unable to subscribe rbac resources")
-
-			ghsi.successful = false
-		}
-
-		klog.V(4).Info("Applying resources: ", ghsi.otherFiles)
-
-		err = ghsi.subscribeResources(hostkey, syncsource, nil, rscPkgMap, ghsi.otherFiles)
-
-		if err != nil {
-			klog.Error(err, "Unable to subscribe other resources")
-
-			ghsi.successful = false
-		}
-
-		klog.V(4).Info("Applying kustomizations: ", ghsi.kustomizeDirs)
-
-		err = ghsi.subscribeKustomizations(hostkey, syncsource, nil, rscPkgMap)
-
-		if err != nil {
-			klog.Error(err, "Unable to subscribe kustomize resources")
-
-			ghsi.successful = false
-		}
-
-		klog.V(4).Info("Applying helm charts..")
-
-		err = ghsi.subscribeHelmCharts(ghsi.indexFile)
-
-		if err != nil {
-			klog.Error(err, "Unable to subscribe helm charts")
-
-			ghsi.successful = false
-		}
-
-		ghsi.commitID = commitID
-
-		ghsi.chartDirs = nil
-		ghsi.kustomizeDirs = nil
-		ghsi.crdsAndNamespaceFiles = nil
-		ghsi.rbacFiles = nil
-		ghsi.otherFiles = nil
-		ghsi.indexFile = nil
-	} else {
-		klog.V(2).Info("The commit ID is same as before. Skip processing the cloned repo")
+	err = ghsi.sortClonedGitRepo()
+	if err != nil {
+		klog.Error(err, "Unable to sort helm charts and kubernetes resources from the cloned git repo.")
+		return err
 	}
+
+	hostkey := types.NamespacedName{Name: ghsi.Subscription.Name, Namespace: ghsi.Subscription.Namespace}
+	syncsource := githubk8ssyncsource + hostkey.String()
+
+	klog.V(4).Info("Applying resources: ", ghsi.crdsAndNamespaceFiles)
+
+	err = ghsi.subscribeResources(ghsi.crdsAndNamespaceFiles)
+
+	if err != nil {
+		klog.Error(err, "Unable to subscribe crd and ns resources")
+	}
+
+	klog.V(4).Info("Applying resources: ", ghsi.rbacFiles)
+
+	err = ghsi.subscribeResources(ghsi.rbacFiles)
+
+	if err != nil {
+		klog.Error(err, "Unable to subscribe rbac resources")
+	}
+
+	klog.V(4).Info("Applying resources: ", ghsi.otherFiles)
+
+	err = ghsi.subscribeResources(ghsi.otherFiles)
+
+	if err != nil {
+		klog.Error(err, "Unable to subscribe other resources")
+	}
+
+	klog.V(4).Info("Applying kustomizations: ", ghsi.kustomizeDirs)
+
+	err = ghsi.subscribeKustomizations()
+
+	if err != nil {
+		klog.Error(err, "Unable to subscribe kustomize resources")
+	}
+
+	klog.V(4).Info("Applying helm charts..")
+
+	err = ghsi.subscribeHelmCharts(ghsi.indexFile)
+
+	if err != nil {
+		klog.Error(err, "Unable to subscribe helm charts")
+	}
+
+	if err := ghsi.synchronizer.AddTemplates(syncsource, hostkey, ghsi.resources); err != nil {
+		klog.Error(err)
+	}
+
+	ghsi.commitID = commitID
+
+	ghsi.resources = nil
+	ghsi.chartDirs = nil
+	ghsi.kustomizeDirs = nil
+	ghsi.crdsAndNamespaceFiles = nil
+	ghsi.rbacFiles = nil
+	ghsi.otherFiles = nil
+	ghsi.indexFile = nil
 
 	return nil
 }
 
-func (ghsi *SubscriberItem) subscribeKustomizations(hostkey types.NamespacedName,
-	syncsource string,
-	kvalid *kubesynchronizer.Validator,
-	pkgMap map[string]bool) error {
+func (ghsi *SubscriberItem) subscribeKustomizations() error {
 	for _, kustomizeDir := range ghsi.kustomizeDirs {
 		klog.Info("Applying kustomization ", kustomizeDir)
 
@@ -273,14 +259,9 @@ func (ghsi *SubscriberItem) subscribeKustomizations(hostkey types.NamespacedName
 				err := checkSubscriptionAnnotation(t)
 				if err != nil {
 					klog.Errorf("Failed to apply %s/%s resource. err: %s", t.APIVersion, t.Kind, err)
-					ghsi.successful = false
 				}
 
-				err = ghsi.subscribeResourceFile(hostkey, syncsource, kvalid, resourceFile, pkgMap)
-				if err != nil {
-					klog.Error("Failed to apply a resource, error: ", err)
-					ghsi.successful = false
-				}
+				ghsi.subscribeResourceFile(resourceFile)
 			}
 		}
 	}
@@ -300,11 +281,7 @@ func checkSubscriptionAnnotation(resource kubeResource) error {
 	return nil
 }
 
-func (ghsi *SubscriberItem) subscribeResources(hostkey types.NamespacedName,
-	syncsource string,
-	kvalid *kubesynchronizer.Validator,
-	pkgMap map[string]bool,
-	rscFiles []string) error {
+func (ghsi *SubscriberItem) subscribeResources(rscFiles []string) error {
 	// sync kube resource deployables
 	for _, rscFile := range rscFiles {
 		file, err := ioutil.ReadFile(rscFile) // #nosec G304 rscFile is not user input
@@ -328,12 +305,7 @@ func (ghsi *SubscriberItem) subscribeResources(hostkey types.NamespacedName,
 
 				klog.V(4).Info("Applying Kubernetes resource of kind ", t.Kind)
 
-				err = ghsi.subscribeResourceFile(hostkey, syncsource, kvalid, resource, pkgMap)
-				if err != nil {
-					klog.Error("Failed to apply a resource, error: ", err)
-
-					ghsi.successful = false
-				}
+				ghsi.subscribeResourceFile(resource)
 			}
 		}
 	}
@@ -341,51 +313,21 @@ func (ghsi *SubscriberItem) subscribeResources(hostkey types.NamespacedName,
 	return nil
 }
 
-func (ghsi *SubscriberItem) subscribeResourceFile(hostkey types.NamespacedName,
-	syncsource string,
-	kvalid *kubesynchronizer.Validator,
-	file []byte,
-	pkgMap map[string]bool) error {
-	dpltosync, validgvk, err := ghsi.subscribeResource(file, pkgMap)
+func (ghsi *SubscriberItem) subscribeResourceFile(file []byte) {
+	dpltosync, validgvk, err := ghsi.subscribeResource(file)
 	if err != nil {
 		klog.Error(err)
-
-		ghsi.successful = false
 	}
 
 	if dpltosync == nil || validgvk == nil {
 		klog.Info("Skipping resource")
-		return nil
+		return
 	}
 
-	pkgMap[dpltosync.GetName()] = true
-
-	klog.V(4).Info("Ready to register template:", hostkey, dpltosync, syncsource)
-
-	if err := ghsi.synchronizer.AddTemplates(syncsource, hostkey, []kubesynchronizer.DplUnit{{Dpl: dpltosync, Gvk: *validgvk}}); err != nil {
-		err = utils.SetInClusterPackageStatus(&(ghsi.Subscription.Status), dpltosync.GetName(), err, nil)
-		ghsi.successful = false
-
-		if err != nil {
-			klog.V(4).Info("error in setting in cluster package status :", err)
-		}
-
-		return err
-	}
-
-	dplkey := types.NamespacedName{
-		Name:      dpltosync.Name,
-		Namespace: dpltosync.Namespace,
-	}
-
-	pkgMap[dplkey.Name] = true
-	//this is for the adaption of the new synchronizer API
-	klog.V(10).Infof("ignore this kvalid %v, only exist for adopting synchronizer API", kvalid)
-
-	return nil
+	ghsi.resources = append(ghsi.resources, kubesynchronizer.DplUnit{Dpl: dpltosync, Gvk: *validgvk})
 }
 
-func (ghsi *SubscriberItem) subscribeResource(file []byte, pkgMap map[string]bool) (*dplv1.Deployable, *schema.GroupVersionKind, error) {
+func (ghsi *SubscriberItem) subscribeResource(file []byte) (*dplv1.Deployable, *schema.GroupVersionKind, error) {
 	rsc := &unstructured.Unstructured{}
 	err := yaml.Unmarshal(file, &rsc)
 
@@ -412,8 +354,6 @@ func (ghsi *SubscriberItem) subscribeResource(file []byte, pkgMap map[string]boo
 		if err != nil {
 			klog.Info("error in setting in cluster package status :", err)
 		}
-
-		pkgMap[dpl.GetName()] = true
 
 		return nil, nil, gvkerr
 	}
@@ -446,7 +386,6 @@ func (ghsi *SubscriberItem) subscribeResource(file []byte, pkgMap map[string]boo
 	if ghsi.Subscription.Spec.PackageOverrides != nil {
 		rsc, err = utils.OverrideResourceBySubscription(rsc, rsc.GetName(), ghsi.Subscription)
 		if err != nil {
-			pkgMap[dpl.GetName()] = true
 			errmsg := "Failed override package " + dpl.Name + " with error: " + err.Error()
 			err = utils.SetInClusterPackageStatus(&(ghsi.Subscription.Status), dpl.GetName(), err, nil)
 
@@ -532,10 +471,6 @@ func (ghsi *SubscriberItem) checkFilters(rsc *unstructured.Unstructured) (errMsg
 }
 
 func (ghsi *SubscriberItem) subscribeHelmCharts(indexFile *repo.IndexFile) (err error) {
-	hostkey := types.NamespacedName{Name: ghsi.Subscription.Name, Namespace: ghsi.Subscription.Namespace}
-	syncsource := githubhelmsyncsource + hostkey.String()
-	pkgMap := make(map[string]bool)
-
 	for packageName, chartVersions := range indexFile.Entries {
 		klog.V(4).Infof("chart: %s\n%v", packageName, chartVersions)
 
@@ -547,37 +482,7 @@ func (ghsi *SubscriberItem) subscribeHelmCharts(indexFile *repo.IndexFile) (err 
 			return err
 		}
 
-		err = ghsi.synchronizer.AddTemplates(syncsource, hostkey, []kubesynchronizer.DplUnit{{Dpl: dpl, Gvk: helmGvk}})
-		if err != nil {
-			ghsi.successful = false
-
-			klog.Info("eror in registering :", err)
-			err = utils.SetInClusterPackageStatus(&(ghsi.Subscription.Status), dpl.GetName(), err, nil)
-
-			if err != nil {
-				klog.Info("error in setting in cluster package status :", err)
-			}
-
-			pkgMap[dpl.GetName()] = true
-
-			return err
-		}
-
-		dplkey := types.NamespacedName{
-			Name:      dpl.Name,
-			Namespace: dpl.Namespace,
-		}
-
-		pkgMap[dplkey.Name] = true
-	}
-
-	if utils.ValidatePackagesInSubscriptionStatus(ghsi.synchronizer.GetLocalClient(), ghsi.Subscription, pkgMap) != nil {
-		err = ghsi.synchronizer.GetLocalClient().Get(context.TODO(), hostkey, ghsi.Subscription)
-		if err != nil {
-			klog.Error("Failed to get subscription resource with error:", err)
-		}
-
-		err = utils.ValidatePackagesInSubscriptionStatus(ghsi.synchronizer.GetLocalClient(), ghsi.Subscription, pkgMap)
+		ghsi.resources = append(ghsi.resources, kubesynchronizer.DplUnit{Dpl: dpl, Gvk: helmGvk})
 	}
 
 	return err
