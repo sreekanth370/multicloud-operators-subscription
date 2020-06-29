@@ -678,13 +678,12 @@ func (r *ReconcileSubscription) prepareDeployableForSubscription(sub, rootSub *a
 	if subutil.GetPauseLabel(sub) {
 		labelPause = "true"
 	}
-	
+
 	labelDeleteResources := "true"
 	if !subutil.GetDeleteResourcesLabel(sub) {
 		labelDeleteResources = "false"
 	}
 
-	label[dplv1alpha1.LabelSubscriptionDeleteResources] = labelDeleteResources
 	dpl := &dplv1alpha1.Deployable{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "Deployable",
@@ -694,7 +693,7 @@ func (r *ReconcileSubscription) prepareDeployableForSubscription(sub, rootSub *a
 			Name:      sub.Name + "-deployable",
 			Namespace: sub.Namespace,
 			Labels: map[string]string{
-				dplv1alpha1.LabelSubscriptionPause: labelPause,
+				dplv1alpha1.LabelSubscriptionPause:           labelPause,
 				dplv1alpha1.LabelSubscriptionDeleteResources: labelDeleteResources,
 			},
 			Annotations: map[string]string{

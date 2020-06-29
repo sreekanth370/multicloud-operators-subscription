@@ -88,12 +88,12 @@ func newReconciler(mgr manager.Manager, hubclient client.Client, subscribers map
 	erecorder, _ := utils.NewEventRecorder(mgr.GetConfig(), mgr.GetScheme())
 
 	rec := &ReconcileSubscription{
-		Client:        mgr.GetClient(),
-		scheme:        mgr.GetScheme(),
-		hubclient:     hubclient,
-		subscribers:   subscribers,
-		clk:           time.Now,
-		eventRecorder: erecorder,
+		Client:          mgr.GetClient(),
+		scheme:          mgr.GetScheme(),
+		hubclient:       hubclient,
+		subscribers:     subscribers,
+		clk:             time.Now,
+		eventRecorder:   erecorder,
 		deleteResources: true,
 	}
 
@@ -127,11 +127,11 @@ type ReconcileSubscription struct {
 	// This client, initialized using mgr.Client() above, is a split client
 	// that reads objects from the cache and writes to the apiserver
 	client.Client
-	hubclient     client.Client
-	scheme        *runtime.Scheme
-	subscribers   map[string]appv1.Subscriber
-	clk           clock
-	eventRecorder *utils.EventRecorder
+	hubclient       client.Client
+	scheme          *runtime.Scheme
+	subscribers     map[string]appv1.Subscriber
+	clk             clock
+	eventRecorder   *utils.EventRecorder
 	deleteResources bool
 }
 
@@ -148,27 +148,29 @@ func (r *ReconcileSubscription) Reconcile(request reconcile.Request) (reconcile.
 		if errors.IsNotFound(err) {
 			klog.Info("Subscription: ", request.NamespacedName, " is gone")
 
-			// Object not found, delete existing subscriberitem if any
-			for _, sub := range r.subscribers {
-				if err := sub.UnsubscribeItem(request.NamespacedName); err != nil {
-					return reconcile.Result{RequeueAfter: time.Second * 2}, err
+			klog.Info("Subscription Deleted now: ", r.deleteResources)
+			if r.deleteResources {
+				// Object not found, delete existing subscriberitem if any
+				for _, sub := range r.subscribers {
+					if err := sub.UnsubscribeItem(request.NamespacedName); err != nil {
+						return reconcile.Result{RequeueAfter: time.Second * 2}, err
+					}
+				}
+
+				objKind := schema.GroupVersionKind{Group: "", Kind: SecretKindStr, Version: "v1"}
+				err := r.DeleteReferredObjects(request.NamespacedName, objKind)
+
+				if err != nil {
+					klog.Errorf("Had error %v while processing the referred secert", err)
+				}
+
+				objKind = schema.GroupVersionKind{Group: "", Kind: ConfigMapKindStr, Version: "v1"}
+				err = r.DeleteReferredObjects(request.NamespacedName, objKind)
+
+				if err != nil {
+					klog.Errorf("Had error %v while processing the referred secert", err)
 				}
 			}
-
-			objKind := schema.GroupVersionKind{Group: "", Kind: SecretKindStr, Version: "v1"}
-			err := r.DeleteReferredObjects(request.NamespacedName, objKind)
-
-			if err != nil {
-				klog.Errorf("Had error %v while processing the referred secert", err)
-			}
-
-			objKind = schema.GroupVersionKind{Group: "", Kind: ConfigMapKindStr, Version: "v1"}
-			err = r.DeleteReferredObjects(request.NamespacedName, objKind)
-
-			if err != nil {
-				klog.Errorf("Had error %v while processing the referred secert", err)
-			}
-
 			return reconcile.Result{}, err
 		}
 		// Error reading the object - requeue the request.
@@ -177,7 +179,8 @@ func (r *ReconcileSubscription) Reconcile(request reconcile.Request) (reconcile.
 
 	// Just update the value, we accept the cost vs a if-then set r.deleteResources
 	r.deleteResources = subutil.GetDeleteResourcesLabel(instance)
-	
+	klog.Info("Subscription Delete: ", r.deleteResources)
+
 	// if the subscription pause label is true, stop subscription here.
 	if subutil.GetPauseLabel(instance) {
 		klog.Info("Subscription: ", request.NamespacedName, " is paused")
