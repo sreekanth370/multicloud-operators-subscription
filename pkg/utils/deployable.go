@@ -168,6 +168,7 @@ func UpdateDeployableStatus(statusClient client.Client, templateerr error, tplun
 		}
 	}
 
+<<<<<<< HEAD
 	now := metav1.Now()
 	dpl.Status.LastUpdateTime = &now
 	err = statusClient.Status().Update(context.Background(), dpl)
@@ -177,6 +178,64 @@ func UpdateDeployableStatus(statusClient client.Client, templateerr error, tplun
 	}
 
 	return err
+=======
+	return nil
+}
+
+// since this is on the managed cluster, so we don't need to check up the
+// propagateStatus
+func isStatusUpdated(old, in dplv1.DeployableStatus) bool {
+	oldResSt, inResSt := old.ResourceUnitStatus, in.ResourceUnitStatus
+	return !isEqualResourceUnitStatus(oldResSt, inResSt)
+}
+
+func isEmptyResourceUnitStatus(a dplv1.ResourceUnitStatus) bool {
+	if len(a.Message) != 0 && len(a.Phase) != 0 || len(a.Reason) != 0 || a.ResourceStatus != nil {
+		return false
+	}
+
+	return true
+}
+
+func isEqualResourceUnitStatus(a, b dplv1.ResourceUnitStatus) bool {
+	if isEmptyResourceUnitStatus(a) && isEmptyResourceUnitStatus(b) {
+		return true
+	}
+
+	if !isEmptyResourceUnitStatus(a) && isEmptyResourceUnitStatus(b) {
+		return false
+	}
+
+	if isEmptyResourceUnitStatus(a) && !isEmptyResourceUnitStatus(b) {
+		return false
+	}
+
+	if a.Phase != b.Phase || a.Reason != b.Reason || a.Message != b.Message {
+		return false
+	}
+
+	//status from cluster
+	aRes := a.ResourceStatus
+	bRes := b.ResourceStatus
+
+	if aRes == nil && bRes == nil {
+		return true
+	}
+
+	if aRes == nil && bRes != nil {
+		return false
+	}
+
+	if aRes != nil && bRes == nil {
+		return false
+	}
+
+	if !reflect.DeepEqual(aRes, bRes) {
+		return false
+	}
+
+	return true
+>>>>>>> 1606516... changing naming
 }
 
 //DeleteDeployableCRD deletes the Deployable CRD
