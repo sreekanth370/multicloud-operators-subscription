@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"reflect"
 	"strings"
 
 	clientsetx "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
@@ -138,47 +139,52 @@ func UpdateDeployableStatus(statusClient client.Client, templateerr error, tplun
 		klog.Info("Failed to find hosting deployable for ", tplunit)
 	}
 
-	err := statusClient.Get(context.TODO(), *host, dpl)
-
-	if err != nil {
+	if err := statusClient.Get(context.TODO(), *host, dpl); err != nil {
 		// for all errors including not found return
 		return err
 	}
 
-	klog.V(10).Info("Trying to update deployable status:", host, templateerr)
-
 	dpl.Status.PropagatedStatus = nil
-	if templateerr == nil {
-		dpl.Status.Phase = dplv1.DeployableDeployed
-		dpl.Status.Reason = ""
-	} else {
-		dpl.Status.Phase = dplv1.DeployableFailed
-		dpl.Status.Reason = templateerr.Error()
-	}
 
-	if status != nil {
-		if dpl.Status.ResourceStatus == nil {
-			dpl.Status.ResourceStatus = &runtime.RawExtension{}
+	newStatus := func() dplv1.DeployableStatus {
+		a := dplv1.DeployableStatus{}
+		if templateerr == nil {
+			a.Phase = dplv1.DeployableDeployed
+			a.Reason = ""
+		} else {
+			a.Phase = dplv1.DeployableFailed
+			a.Reason = templateerr.Error()
 		}
 
-		dpl.Status.ResourceStatus.Raw, err = json.Marshal(status)
+		a.ResourceStatus = &runtime.RawExtension{}
 
-		if err != nil {
-			klog.Info("Failed to mashall status for ", host, status, " with err:", err)
+		var err error
+
+		if status != nil {
+			a.ResourceStatus.Raw, err = json.Marshal(status)
+			if err != nil {
+				klog.Info("Failed to mashall status for ", host, status, " with err:", err)
+			}
+		}
+		return a
+	}()
+
+	klog.V(1).Info("Trying to update deployable status:", host, templateerr)
+	klog.Infof("old status: %v; new status: %v", dpl.Status, newStatus)
+
+	if isStatusUpdated(dpl.Status, newStatus) {
+		klog.Infof("updating old %v, new %v", dpl.Status, newStatus)
+
+		now := metav1.Now()
+		dpl.Status.LastUpdateTime = &now
+
+		// want to print out the error log before leave
+		if err := statusClient.Status().Update(context.Background(), dpl); err != nil {
+			klog.Error("Failed to update status of deployable ", dpl)
+			return err
 		}
 	}
 
-<<<<<<< HEAD
-	now := metav1.Now()
-	dpl.Status.LastUpdateTime = &now
-	err = statusClient.Status().Update(context.Background(), dpl)
-	// want to print out the error log before leave
-	if err != nil {
-		klog.Error("Failed to update status of deployable ", dpl)
-	}
-
-	return err
-=======
 	return nil
 }
 
@@ -235,7 +241,6 @@ func isEqualResourceUnitStatus(a, b dplv1.ResourceUnitStatus) bool {
 	}
 
 	return true
->>>>>>> 1606516... changing naming
 }
 
 //DeleteDeployableCRD deletes the Deployable CRD
