@@ -38,7 +38,8 @@ import (
 )
 
 const (
-	hookInterval = time.Second * 90
+	hookInterval   = time.Second * 90
+	commitIDSuffix = "-new"
 )
 
 type GitOps interface {
@@ -46,34 +47,42 @@ type GitOps interface {
 	//the resource to
 	DownloadAnsibleHookResource(*subv1.Subscription) error
 
+	HasHookFolders(*subv1.Subscription) bool
+
 	// GetHooks returns the ansiblejob from a given folder, if the folder is
 	// inaccessible, then os.Error is returned
 	GetHooks(*subv1.Subscription, string) ([]ansiblejob.AnsibleJob, error)
 
-	// RegisterBranch
+	// RegisterBranch to git watcher and do a initial download for other
+	// components to consume
 	RegisterBranch(*subv1.Subscription)
 
 	// DeregisterBranch
 	DeregisterBranch(types.NamespacedName)
 
-	GetSubRecords() map[types.NamespacedName]string
-
 	//helper for test
 	GetRepoRecords() map[string]*RepoRegistery
-
-	GetCommitFunc(*subv1.Subscription) GetCommitFunc
+	GetSubRecords() map[types.NamespacedName]string
 
 	//GetLatestCommitID will output the latest commit id from local git record
 	GetLatestCommitID(*subv1.Subscription) (string, error)
+	//ResolveLocalGitFolder is used to open a local folder for downloading the
+	//repo branch
+	ResolveLocalGitFolder(*chnv1.Channel, *subv1.Subscription) string
+
+	GetRepoRootDirctory(*subv1.Subscription) string
+
 	//Runnable
 	Start(<-chan struct{}) error
 }
 
 type branchInfo struct {
-	lastCommitID  string
-	username      string
-	secret        string
-	registeredSub map[types.NamespacedName]struct{}
+	localDir           string
+	lastCommitID       string
+	username           string
+	secret             string
+	insecureSkipVerify bool
+	registeredSub      map[types.NamespacedName]struct{}
 }
 
 type RepoRegistery struct {
@@ -82,18 +91,18 @@ type RepoRegistery struct {
 }
 
 type GetCommitFunc func(string, string, string, string) (string, error)
-type cloneFunc func(client.Client, string, *chnv1.Channel, *subv1.Subscription) (string, error)
+type cloneFunc func(string, string, string, string, string, bool) (string, error)
 
 type HubGitOps struct {
-	clt             client.Client
-	logger          logr.Logger
-	localDir        string
-	mtx             sync.Mutex
-	watcherInterval time.Duration
-	subRecords      map[types.NamespacedName]string
-	repoRecords     map[string]*RepoRegistery
-	getCommitFunc   GetCommitFunc
-	cloneFunc       cloneFunc
+	clt                 client.Client
+	logger              logr.Logger
+	mtx                 sync.Mutex
+	watcherInterval     time.Duration
+	subRecords          map[types.NamespacedName]string
+	repoRecords         map[string]*RepoRegistery
+	downloadDirResolver func(*chnv1.Channel, *subv1.Subscription) string
+	getCommitFunc       GetCommitFunc
+	cloneFunc           cloneFunc
 }
 
 var _ GitOps = (*HubGitOps)(nil)
@@ -112,6 +121,12 @@ func setHubGitOpsLogger(logger logr.Logger) HubGitOption {
 	}
 }
 
+func setLocalDirResovler(resolveFunc func(*chnv1.Channel, *subv1.Subscription) string) HubGitOption {
+	return func(a *HubGitOps) {
+		a.downloadDirResolver = resolveFunc
+	}
+}
+
 func setGetCommitFunc(gFunc GetCommitFunc) HubGitOption {
 	return func(a *HubGitOps) {
 		a.getCommitFunc = gFunc
@@ -126,13 +141,14 @@ func setGetCloneFunc(cFunc cloneFunc) HubGitOption {
 
 func NewHookGit(clt client.Client, ops ...HubGitOption) *HubGitOps {
 	hGit := &HubGitOps{
-		clt:             clt,
-		mtx:             sync.Mutex{},
-		watcherInterval: hookInterval,
-		subRecords:      map[types.NamespacedName]string{},
-		repoRecords:     map[string]*RepoRegistery{},
-		getCommitFunc:   GetLatestRemoteGitCommitID,
-		cloneFunc:       cloneGitRepo,
+		clt:                 clt,
+		mtx:                 sync.Mutex{},
+		watcherInterval:     hookInterval,
+		subRecords:          map[types.NamespacedName]string{},
+		repoRecords:         map[string]*RepoRegistery{},
+		downloadDirResolver: utils.GetLocalGitFolder,
+		getCommitFunc:       GetLatestRemoteGitCommitID,
+		cloneFunc:           cloneGitRepoBranch,
 	}
 
 	for _, op := range ops {
@@ -165,11 +181,17 @@ func (h *HubGitOps) GitWatch() {
 		url := repoRegistery.url
 		// need to figure out a way to separate the private repo
 		for bName, branchInfo := range repoRegistery.branchs {
-			h.logger.Info(fmt.Sprintf("Checking commit for Git: %s Branch: %s ", url, bName))
+			h.logger.Info(fmt.Sprintf("Checking commit for Git: %s Branch: %s", url, bName))
 			nCommit, err := h.getCommitFunc(url, bName, branchInfo.username, branchInfo.secret)
 
 			if err != nil {
 				h.logger.Error(err, "failed to get the latest commit id")
+			}
+
+			// safe guard condition to filter out the edge case
+			if nCommit == "" {
+				h.logger.Info(fmt.Sprintf("repo %s, branch %s get empty commit ID from remote", url, bName))
+				continue
 			}
 
 			h.logger.V(InfoLog).Info(fmt.Sprintf("repo %s, branch %s commit update from (%s) to (%s)", url, bName, branchInfo.lastCommitID, nCommit))
@@ -181,6 +203,10 @@ func (h *HubGitOps) GitWatch() {
 
 			h.repoRecords[repoName].branchs[bName].lastCommitID = nCommit
 			h.logger.Info("The repo has new commit: " + nCommit)
+
+			if _, err := h.cloneFunc(url, bName, branchInfo.username, branchInfo.secret, branchInfo.localDir, branchInfo.insecureSkipVerify); err != nil {
+				h.logger.Error(err, "failed to download repo for %s, at brnach @%s", repoName, bName)
+			}
 
 			for subKey := range branchInfo.registeredSub {
 				// Update the commit annotation with a wrong commit ID to trigger hub subscription reconcile.
@@ -264,13 +290,14 @@ func setBranch(subIns *subv1.Subscription, bName string) {
 	subIns.SetAnnotations(an)
 }
 
-func genRepoName(repoURL, user, pwd string) string {
-	repoName := repoURL
-	if pwd != "" {
-		repoName += user
-	}
+func genRepoName(subName, subNamespace string) string {
+	repoName := subName + subNamespace
 
 	return repoName
+}
+
+func (h *HubGitOps) ResolveLocalGitFolder(chn *chnv1.Channel, subIns *subv1.Subscription) string {
+	return h.downloadDirResolver(chn, subIns)
 }
 
 func (h *HubGitOps) RegisterBranch(subIns *subv1.Subscription) {
@@ -298,9 +325,21 @@ func (h *HubGitOps) RegisterBranch(subIns *subv1.Subscription) {
 		return
 	}
 
+	skipCertVerify := false
+
+	if channel.Spec.InsecureSkipVerify {
+		skipCertVerify = true
+
+		h.logger.Info("Channel spec has insecureSkipVerify: true.")
+	}
+
 	repoURL := channel.Spec.Pathname
-	repoName := genRepoName(repoURL, user, pwd)
+	// repoName is the key of a map that stores repository information for subscription.
+	// It needs to be unique for each subscription because each subscription need to
+	// have its own copy of cloned repo to work on subscription specific overrides.
+	repoName := genRepoName(subIns.Name, subIns.Namespace)
 	branchName := genBranchString(subIns)
+	repoBranchDir := h.downloadDirResolver(channel, subIns)
 
 	h.mtx.Lock()
 	defer h.mtx.Unlock()
@@ -308,24 +347,22 @@ func (h *HubGitOps) RegisterBranch(subIns *subv1.Subscription) {
 	h.subRecords[subKey] = repoName
 	bInfo, ok := h.repoRecords[repoName]
 
-	commitID, err := h.initialDownload(subIns)
+	commitID, err := h.cloneFunc(repoURL, branchName, user, pwd, repoBranchDir, skipCertVerify)
 	if err != nil {
 		h.logger.Error(err, "failed to get commitID from initialDownload")
 	}
 
 	//make sure the initial prehook is passed
-	if getCommitID(subIns) == "" {
-		setCommitID(subIns, commitID)
-	}
-
 	if !ok {
 		h.repoRecords[repoName] = &RepoRegistery{
 			url: repoURL,
 			branchs: map[string]*branchInfo{
 				branchName: {
-					username:     user,
-					secret:       pwd,
-					lastCommitID: commitID,
+					localDir:           repoBranchDir,
+					username:           user,
+					secret:             pwd,
+					insecureSkipVerify: skipCertVerify,
+					lastCommitID:       commitID,
 					registeredSub: map[types.NamespacedName]struct{}{
 						subKey: {},
 					},
@@ -338,9 +375,11 @@ func (h *HubGitOps) RegisterBranch(subIns *subv1.Subscription) {
 
 	if bInfo.branchs[branchName] == nil {
 		bInfo.branchs[branchName] = &branchInfo{
-			username:     user,
-			secret:       pwd,
-			lastCommitID: commitID,
+			username:           user,
+			secret:             pwd,
+			insecureSkipVerify: skipCertVerify,
+			localDir:           repoBranchDir,
+			lastCommitID:       commitID,
 			registeredSub: map[types.NamespacedName]struct{}{
 				subKey: {},
 			},
@@ -353,7 +392,21 @@ func (h *HubGitOps) RegisterBranch(subIns *subv1.Subscription) {
 }
 
 func fakeCommitID(c string) string {
-	return fmt.Sprintf("%s-new", c)
+	return fmt.Sprintf("%s%s", c, commitIDSuffix)
+}
+
+func unmaskFakeCommitID(c string) string {
+	return strings.TrimSuffix(c, commitIDSuffix)
+}
+
+func unmaskFakeCommiIDOnSubIns(subIns *subv1.Subscription) *subv1.Subscription {
+	out := subIns.DeepCopy()
+
+	umaskCommitID := unmaskFakeCommitID(getCommitID(out))
+
+	setCommitID(out, umaskCommitID)
+
+	return out
 }
 
 func setCommitID(subIns *subv1.Subscription, commitID string) {
@@ -405,78 +458,43 @@ func GetLatestRemoteGitCommitID(repo, branch, secret, pwd string) (string, error
 func (h *HubGitOps) GetLatestCommitID(subIns *subv1.Subscription) (string, error) {
 	subKey := types.NamespacedName{Name: subIns.GetName(), Namespace: subIns.GetNamespace()}
 
-	repoName, ok := h.subRecords[subKey]
+	_, ok := h.subRecords[subKey]
 	if !ok { // when git watcher doesn't have the record, go ahead clone the repo and return the commitID
-		return h.initialDownload(subIns)
+		h.RegisterBranch(subIns)
 	}
+
+	repoName := h.subRecords[subKey]
 
 	return h.repoRecords[repoName].branchs[genBranchString(subIns)].lastCommitID, nil
 }
 
-func (h *HubGitOps) GetCommitFunc(subIns *subv1.Subscription) GetCommitFunc {
-	if _, err := h.initialDownload(subIns); err != nil {
-		h.logger.Error(err, "failed to download the target repo for the first time")
+func (h *HubGitOps) GetRepoRootDirctory(subIns *subv1.Subscription) string {
+	subKey := types.NamespacedName{Name: subIns.GetName(), Namespace: subIns.GetNamespace()}
+
+	repoKey, ok := h.subRecords[subKey]
+	if !ok {
+		return ""
 	}
 
-	return h.getCommitFunc
-}
-
-func (h *HubGitOps) initialDownload(subIns *subv1.Subscription) (string, error) {
-	// the repo is downloaded already
-	if h.localDir != "" {
-		return "", nil
-	}
-
-	chn := &chnv1.Channel{}
-	chnkey := utils.NamespacedNameFormat(subIns.Spec.Channel)
-
-	if err := h.clt.Get(context.TODO(), chnkey, chn); err != nil {
-		return "", err
-	}
-
-	repoRoot := utils.GetLocalGitFolder(chn, subIns)
-	h.localDir = repoRoot
-
-	return h.cloneFunc(h.clt, repoRoot, chn, subIns)
+	return h.repoRecords[repoKey].branchs[genBranchString(subIns)].localDir
 }
 
 func (h *HubGitOps) DownloadAnsibleHookResource(subIns *subv1.Subscription) error {
-	chn := &chnv1.Channel{}
-	chnkey := utils.NamespacedNameFormat(subIns.Spec.Channel)
+	h.logger.V(DebugLog).Info("entry DownloadAnsibleHookResource")
+	defer h.logger.V(DebugLog).Info("exit DownloadAnsibleHookResource")
 
-	if err := h.clt.Get(context.TODO(), chnkey, chn); err != nil {
-		return err
+	// meaning the branch is already downloaded
+	if h.GetRepoRootDirctory(subIns) != "" {
+		return nil
 	}
 
-	return h.donwloadAnsibleJobFromGit(h.clt, chn, subIns, h.logger)
-}
-
-func (h *HubGitOps) donwloadAnsibleJobFromGit(clt client.Client, chn *chnv1.Channel, sub *subv1.Subscription, logger logr.Logger) error {
-	logger.V(DebugLog).Info("entry donwloadAnsibleJobFromGit")
-	defer logger.V(DebugLog).Info("exit donwloadAnsibleJobFromGit")
-
-	repoRoot := utils.GetLocalGitFolder(chn, sub)
-	h.localDir = repoRoot
-
-	c, err := cloneGitRepo(clt, repoRoot, chn, sub)
-
-	if err != nil {
-		return err
-	}
-
-	logger.V(DebugLog).Info(fmt.Sprintf("%v SHA is downloaded", c))
+	h.RegisterBranch(subIns)
 
 	return nil
 }
 
-func cloneGitRepo(clt client.Client, repoRoot string, chn *chnv1.Channel, sub *subv1.Subscription) (commitID string, err error) {
-	user, pwd, err := utils.GetChannelSecret(clt, chn)
-
-	if err != nil {
-		return "", err
-	}
-
-	return utils.CloneGitRepo(chn.Spec.Pathname, utils.GetSubscriptionBranch(sub), user, pwd, repoRoot)
+func cloneGitRepoBranch(repoURL string, branchName string, user, pwd, repoBranchDir string, skipCertVerify bool) (string, error) {
+	return utils.CloneGitRepo(repoURL, utils.GetSubscriptionBranchRef(branchName), user, pwd, repoBranchDir, skipCertVerify)
 }
 
 type gitSortResult struct {
@@ -582,10 +600,28 @@ func parseAsAnsibleJobs(rscFiles []string, parser func([]byte) [][]byte, logger 
 	return jobs, nil
 }
 
+func (h *HubGitOps) HasHookFolders(subIns *subv1.Subscription) bool {
+	pre, post := getHookPath(subIns)
+
+	if pre == "" && post == "" {
+		return false
+	}
+
+	bLocalPath := h.GetRepoRootDirctory(subIns)
+
+	preFullPath := fmt.Sprintf("%v/%v", bLocalPath, pre)
+	_, preErr := os.Stat(preFullPath)
+
+	postFullPath := fmt.Sprintf("%v/%v", bLocalPath, post)
+	_, postErr := os.Stat(postFullPath)
+
+	return preErr == nil || postErr == nil
+}
+
 //GetHooks will provided the ansibleJobs at the given hookPath(if given a
 //posthook path, then posthook ansiblejob is returned)
 func (h *HubGitOps) GetHooks(subIns *subv1.Subscription, hookPath string) ([]ansiblejob.AnsibleJob, error) {
-	fullPath := fmt.Sprintf("%v/%v", h.localDir, hookPath)
+	fullPath := fmt.Sprintf("%v/%v", h.GetRepoRootDirctory(subIns), hookPath)
 	if _, err := os.Stat(fullPath); err != nil {
 		if os.IsNotExist(err) {
 			return []ansiblejob.AnsibleJob{}, nil
@@ -596,7 +632,7 @@ func (h *HubGitOps) GetHooks(subIns *subv1.Subscription, hookPath string) ([]ans
 		return []ansiblejob.AnsibleJob{}, err
 	}
 
-	sortedRes, err := sortClonedGitRepoGievnDestPath(h.localDir, hookPath, h.logger)
+	sortedRes, err := sortClonedGitRepoGievnDestPath(h.GetRepoRootDirctory(subIns), hookPath, h.logger)
 	if err != nil {
 		return []ansiblejob.AnsibleJob{}, err
 	}

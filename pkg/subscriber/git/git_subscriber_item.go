@@ -247,7 +247,7 @@ func (ghsi *SubscriberItem) subscribeKustomizations() error {
 		}
 
 		// Split the output of kustomize build output into individual kube resource YAML files
-		resources := strings.Split(string(out), "---")
+		resources := utils.ParseYAML(out)
 		for _, resource := range resources {
 			resourceFile := []byte(strings.Trim(resource, "\t \n"))
 
@@ -526,7 +526,13 @@ func (ghsi *SubscriberItem) cloneGitRepo() (commitID string, err error) {
 		}
 	}
 
-	return utils.CloneGitRepo(ghsi.Channel.Spec.Pathname, utils.GetSubscriptionBranch(ghsi.Subscription), user, token, ghsi.repoRoot)
+	return utils.CloneGitRepo(
+		ghsi.Channel.Spec.Pathname,
+		utils.GetSubscriptionBranch(ghsi.Subscription),
+		user,
+		token,
+		ghsi.repoRoot,
+		ghsi.Channel.Spec.InsecureSkipVerify)
 }
 
 func (ghsi *SubscriberItem) sortClonedGitRepo() error {

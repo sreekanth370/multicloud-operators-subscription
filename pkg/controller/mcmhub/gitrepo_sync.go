@@ -88,24 +88,31 @@ func (r *ReconcileSubscription) UpdateGitDeployablesAnnotation(sub *appv1.Subscr
 		// Compare the commit to the Git repo and update deployables only if the commit has changed
 		// If subscription does not have commit annotation, it needs to be generated in this block.
 		oldCommit := getCommitID(sub)
+
 		if oldCommit == "" || !strings.EqualFold(oldCommit, commit) ||
 			r.isHookUpdate(annotations, subKey) {
-			klog.Infof("The Git commit has changed since the last reconcile. last: %s, new: %s", oldCommit, commit)
+			if oldCommit == "" || !strings.EqualFold(oldCommit, commit) {
+				klog.Infof("The Git commit has changed since the last reconcile. last: %s, new: %s", oldCommit, commit)
+			}
+
+			if r.isHookUpdate(annotations, subKey) {
+				klog.Info("The topo annotation does not have applied hooks. Adding it.")
+			}
 			// Delete the existing deployables that meets the subscription
 			// selector and recreate them
 			r.deleteSubscriptionDeployables(sub)
 
-			setCommitID(sub, commit)
+			baseDir := r.hubGitOps.GetRepoRootDirctory(sub)
+			resourcePath := getResourcePath(r.hubGitOps.ResolveLocalGitFolder, channel, sub)
 
-			baseDir := utils.GetLocalGitFolder(channel, sub)
-			resourcePath := getResourcePath(channel, sub)
-
-			err = r.processRepo(channel, sub, utils.GetLocalGitFolder(channel, sub), resourcePath, baseDir)
+			err = r.processRepo(channel, sub, r.hubGitOps.ResolveLocalGitFolder(channel, sub), resourcePath, baseDir)
 
 			if err != nil {
 				klog.Error(err.Error())
 				return false, err
 			}
+
+			setCommitID(sub, commit)
 
 			r.updateGitSubDeployablesAnnotation(sub)
 
@@ -233,14 +240,14 @@ func (r *ReconcileSubscription) AddClusterAdminAnnotation(sub *appv1.Subscriptio
 	return false
 }
 
-func getResourcePath(chn *chnv1.Channel, sub *appv1.Subscription) string {
-	resourcePath := utils.GetLocalGitFolder(chn, sub)
+func getResourcePath(localFolderFunc func(*chnv1.Channel, *appv1.Subscription) string, chn *chnv1.Channel, sub *appv1.Subscription) string {
+	resourcePath := localFolderFunc(chn, sub)
 
 	annotations := sub.GetAnnotations()
 	if annotations[appv1.AnnotationGithubPath] != "" {
-		resourcePath = filepath.Join(utils.GetLocalGitFolder(chn, sub), annotations[appv1.AnnotationGithubPath])
+		resourcePath = filepath.Join(localFolderFunc(chn, sub), annotations[appv1.AnnotationGithubPath])
 	} else if annotations[appv1.AnnotationGitPath] != "" {
-		resourcePath = filepath.Join(utils.GetLocalGitFolder(chn, sub), annotations[appv1.AnnotationGitPath])
+		resourcePath = filepath.Join(localFolderFunc(chn, sub), annotations[appv1.AnnotationGitPath])
 	}
 
 	return resourcePath
@@ -267,7 +274,7 @@ func getGitChart(sub *appv1.Subscription, localRepoRoot, subPath string) (*repo.
 }
 
 func (r *ReconcileSubscription) gitHelmResourceString(sub *appv1.Subscription, chn *chnv1.Channel) string {
-	idxFile, err := getGitChart(sub, utils.GetLocalGitFolder(chn, sub), getResourcePath(chn, sub))
+	idxFile, err := getGitChart(sub, utils.GetLocalGitFolder(chn, sub), getResourcePath(r.hubGitOps.ResolveLocalGitFolder, chn, sub))
 	if err != nil {
 		klog.Error(err.Error())
 		return ""
@@ -362,6 +369,7 @@ func (r *ReconcileSubscription) updateAnnotationTopo(sub *subv1.Subscription, al
 
 func (r *ReconcileSubscription) processRepo(chn *chnv1.Channel, sub *appv1.Subscription, localRepoRoot, subPath, baseDir string) error {
 	chartDirs, kustomizeDirs, crdsAndNamespaceFiles, rbacFiles, otherFiles, err := utils.SortResources(localRepoRoot, subPath)
+
 	if err != nil {
 		klog.Error(err, "Failed to sort kubernetes resources and helm charts.")
 		return err
@@ -432,7 +440,7 @@ func (r *ReconcileSubscription) subscribeResources(chn *chnv1.Channel, sub *appv
 
 		klog.Info("Processing ... " + rscFile)
 
-		resourceDir := strings.Split(dir, baseDir)[1]
+		resourceDir := strings.TrimPrefix(dir, baseDir)
 		resourceDir = strings.Trim(resourceDir, "/")
 
 		resources := utils.ParseKubeResoures(file)
@@ -460,7 +468,9 @@ func (r *ReconcileSubscription) subscribeKustomizations(chn *chnv1.Channel, sub 
 
 		for _, ov := range sub.Spec.PackageOverrides {
 			ovKustomizeDir := strings.Split(ov.PackageName, "kustomization")[0]
-			if !strings.EqualFold(ovKustomizeDir, relativePath) {
+
+			//If the full kustomization.yaml path is specified but different than the current kustomize dir, egnore
+			if !strings.EqualFold(ovKustomizeDir, relativePath) && !strings.EqualFold(ovKustomizeDir, "") {
 				continue
 			} else {
 				klog.Info("Overriding kustomization ", kustomizeDir)
@@ -480,7 +490,7 @@ func (r *ReconcileSubscription) subscribeKustomizations(chn *chnv1.Channel, sub 
 		}
 
 		// Split the output of kustomize build output into individual kube resource YAML files
-		resources := strings.Split(string(out), "---")
+		resources := utils.ParseYAML(out)
 		for _, resource := range resources {
 			resourceFile := []byte(strings.Trim(resource, "\t \n"))
 

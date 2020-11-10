@@ -76,7 +76,7 @@ rules:
   - '*'`
 
 const (
-	hubLogger                  = "subscription-hub-reconciler"
+	reconcileName              = "subscription-hub-reconciler"
 	defaultHookRequeueInterval = time.Second * 15
 	INFOLevel                  = 1
 	placementRuleFlag          = "--fired-by-placementrule"
@@ -102,11 +102,12 @@ func resetHubGitOps(g GitOps) Option {
 // newReconciler returns a new reconcile.Reconciler
 func newReconciler(mgr manager.Manager, op ...Option) reconcile.Reconciler {
 	erecorder, _ := utils.NewEventRecorder(mgr.GetConfig(), mgr.GetScheme())
-	logger := klogr.New().WithName(hubLogger)
+	logger := klogr.New().WithName(reconcileName)
 
 	gitOps := NewHookGit(mgr.GetClient(), setHubGitOpsLogger(logger))
 
 	rec := &ReconcileSubscription{
+		name:   reconcileName,
 		Client: mgr.GetClient(),
 		// used for the helm to run get the resource list
 		cfg:                 mgr.GetConfig(),
@@ -344,6 +345,7 @@ var _ reconcile.Reconciler = &ReconcileSubscription{}
 type ReconcileSubscription struct {
 	// This client, initialized using mgr.Client() above, is a split client
 	// that reads objects from the cache and writes to the apiserver
+	name string
 	client.Client
 	logger              logr.Logger
 	cfg                 *rest.Config
@@ -451,19 +453,19 @@ func (r *ReconcileSubscription) setHubSubscriptionStatus(sub *appv1.Subscription
 // and what is in the Subscription.Spec
 func (r *ReconcileSubscription) Reconcile(request reconcile.Request) (result reconcile.Result, returnErr error) {
 	logger := r.logger.WithName(request.String())
-	logger.V(INFOLevel).Info(fmt.Sprint("entry MCM Hub Reconciling subscription: ", request.String()))
+	logger.Info(fmt.Sprint("entry MCM Hub Reconciling subscription: ", request.String()))
 
-	defer logger.V(INFOLevel).Info(fmt.Sprint("exist Hub Reconciling subscription: ", request.String()))
+	defer logger.Info(fmt.Sprint("exist Hub Reconciling subscription: ", request.String()))
 
 	//flag used to determine if we skip the posthook
 	passedPrehook := true
 
 	//flag used to determine if the reconcile came from a placementrule decision change then force register
-	forceRegister := false
+	placementDecisionUpdated := false
 	placementRuleRv := ""
 
 	if strings.Contains(request.Name, placementRuleFlag) {
-		forceRegister = true
+		placementDecisionUpdated = true
 		placementRuleRv = after(request.Name, placementRuleFlag)
 		request.Name = strings.TrimSuffix(request.Name, placementRuleRv)
 		request.Name = strings.TrimSuffix(request.Name, placementRuleFlag)
@@ -518,7 +520,7 @@ func (r *ReconcileSubscription) Reconcile(request reconcile.Request) (result rec
 	} else if pl != nil && (pl.PlacementRef != nil || pl.Clusters != nil || pl.ClusterSelector != nil) {
 		r.hubGitOps.RegisterBranch(instance)
 		// register will skip the failed clone repo
-		if err := r.hooks.RegisterSubscription(instance, forceRegister, placementRuleRv); err != nil {
+		if err := r.hooks.RegisterSubscription(instance, placementDecisionUpdated, placementRuleRv); err != nil {
 			logger.Error(err, "failed to register hooks, skip the subscription reconcile")
 			preErr = fmt.Errorf("failed to register hooks, err: %v", err)
 
@@ -539,13 +541,13 @@ func (r *ReconcileSubscription) Reconcile(request reconcile.Request) (result rec
 				return reconcile.Result{}, nil
 			}
 
-			r.overridePrehookTopoAnnotation(instance)
-
 			//if it's registered
 			b, err := r.hooks.IsPreHooksCompleted(request.NamespacedName)
 			if !b || err != nil {
 				// used for use the status update
 				_ = preErr
+
+				r.overridePrehookTopoAnnotation(instance)
 
 				if err != nil {
 					logger.Error(err, "failed to check prehook status, skip the subscription reconcile")
@@ -709,7 +711,7 @@ func (r *ReconcileSubscription) finalCommit(passedPrehook bool, preErr error,
 	}
 
 	if utils.IsSubscriptionBasicChanged(oIns, nIns) { //if subresource enabled, the update client won't update the status
-		if err := r.Client.Update(context.TODO(), nIns.DeepCopy()); err != nil {
+		if err := r.Client.Update(context.TODO(), nIns.DeepCopy(), &client.UpdateOptions{FieldManager: r.name}); err != nil {
 			if res.RequeueAfter == time.Duration(0) {
 				res.RequeueAfter = defaulRequeueInterval
 				r.logger.Error(err, fmt.Sprintf("%s failed to update spec or metadata, will retry after %s", PrintHelper(nIns), res.RequeueAfter))
@@ -728,9 +730,11 @@ func (r *ReconcileSubscription) finalCommit(passedPrehook bool, preErr error,
 		return
 	}
 
+	r.logger.Info(fmt.Sprintf("spec or metadata of %s is updated", PrintHelper(nIns)))
 	//update status early to make sure the status is ready for post hook to
 	//consume
 	if !passedPrehook {
+		nIns.Status = r.hooks.AppendPreHookStatusToSubscription(nIns)
 		nIns.Status.Phase = appv1.SubscriptionPropagationFailed
 		nIns.Status.Reason = preErr.Error()
 		nIns.Status.Statuses = appv1.SubscriptionClusterStatusMap{}
@@ -741,7 +745,9 @@ func (r *ReconcileSubscription) finalCommit(passedPrehook bool, preErr error,
 	if utils.IsHubRelatedStatusChanged(oIns.Status.DeepCopy(), nIns.Status.DeepCopy()) {
 		nIns.Status.LastUpdateTime = metav1.Now()
 
-		if err := r.Client.Status().Update(context.TODO(), nIns.DeepCopy()); err != nil {
+		err := r.Client.Status().Patch(context.TODO(), nIns, client.MergeFrom(oIns), &client.PatchOptions{FieldManager: r.name})
+		if err != nil && !k8serrors.IsNotFound(err) {
+			// If it was a NotFound error, the object was probably already deleted so just ignore the error and return the existing result.
 			if res.RequeueAfter == time.Duration(0) {
 				res.RequeueAfter = defaulRequeueInterval
 				r.logger.Error(err, fmt.Sprintf("failed to update status, will retry after %s", res.RequeueAfter))
@@ -780,15 +786,15 @@ func (r *ReconcileSubscription) finalCommit(passedPrehook bool, preErr error,
 	nIns.Status = r.hooks.AppendStatusToSubscription(nIns)
 	nIns.Status.LastUpdateTime = metav1.Now()
 
-	if err := r.Client.Status().Update(context.TODO(), nIns.DeepCopy()); err != nil {
-		if k8serrors.IsGone(err) {
-			return
-		}
-
+	err = r.Client.Status().Patch(context.TODO(), nIns, client.MergeFrom(oIns), &client.PatchOptions{FieldManager: r.name})
+	if err != nil && !k8serrors.IsNotFound(err) {
+		// If it was a NotFound error, the object was probably already deleted so just ignore the error and return the existing result.
 		if res.RequeueAfter == time.Duration(0) {
 			res.RequeueAfter = defaulRequeueInterval
 			r.logger.Error(err, fmt.Sprintf("failed to update status, will retry after %s", res.RequeueAfter))
 		}
+
+		return
 	}
 }
 

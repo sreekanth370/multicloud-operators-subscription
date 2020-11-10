@@ -71,7 +71,7 @@ func (r *ReconcileSubscription) doMCMHubReconcile(sub *appv1alpha1.Subscription)
 	case chnv1alpha1.ChannelTypeGit, chnv1alpha1.ChannelTypeGitHub:
 		updateSubDplAnno, err = r.UpdateGitDeployablesAnnotation(sub)
 	case chnv1alpha1.ChannelTypeHelmRepo:
-		updateSubDplAnno = UpdateHelmTopoAnnotation(r.Client, r.cfg, sub)
+		updateSubDplAnno = UpdateHelmTopoAnnotation(r.Client, r.cfg, sub, channel.Spec.InsecureSkipVerify)
 	default:
 		updateSubDplAnno = r.UpdateDeployablesAnnotation(sub)
 	}
@@ -783,6 +783,8 @@ func (r *ReconcileSubscription) updateSubscriptionStatus(sub *appv1alpha1.Subscr
 
 	newsubstatus := appv1alpha1.SubscriptionStatus{}
 
+	newsubstatus.AnsibleJobsStatus = *sub.Status.AnsibleJobsStatus.DeepCopy()
+
 	newsubstatus.Phase = appv1alpha1.SubscriptionPropagated
 	newsubstatus.Message = ""
 	newsubstatus.Reason = ""
@@ -846,7 +848,6 @@ func (r *ReconcileSubscription) updateSubscriptionStatus(sub *appv1alpha1.Subscr
 			sub.Namespace, sub.Name, sub.Status, newsubstatus)
 
 		//perserve the Ansiblejob status
-		newsubstatus.AnsibleJobsStatus = *sub.Status.AnsibleJobsStatus.DeepCopy()
 		newsubstatus.DeepCopyInto(&sub.Status)
 	}
 

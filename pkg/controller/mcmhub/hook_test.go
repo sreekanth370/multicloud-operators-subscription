@@ -49,7 +49,6 @@ const (
 type hookTest struct {
 	interval            time.Duration
 	hookRequeueInterval Option
-	suffixFunc          Option
 	chnIns              *chnv1.Channel
 	subIns              *subv1.Subscription
 
@@ -63,14 +62,6 @@ type hookTest struct {
 }
 
 func newHookTest() *hookTest {
-	setSufficFunc := func(r *ReconcileSubscription) {
-		sf := func(s *subv1.Subscription) string {
-			return ""
-		}
-
-		r.hooks.SetSuffixFunc(sf)
-	}
-
 	testNs := "ansible"
 	dSubKey := types.NamespacedName{Name: "t-sub", Namespace: testNs}
 	chnKey := types.NamespacedName{Name: "t-chn", Namespace: testNs}
@@ -114,7 +105,6 @@ func newHookTest() *hookTest {
 	return &hookTest{
 		interval:            hookRequeueInterval,
 		hookRequeueInterval: setRequeueInterval,
-		suffixFunc:          setSufficFunc,
 		chnIns:              chn.DeepCopy(),
 		subIns:              subIns.DeepCopy(),
 
@@ -177,7 +167,7 @@ var _ = Describe("multiple reconcile signal of the same subscription instance sp
 
 				fmt.Printf("sub %s = u %+v\n", k, u)
 
-				return errors.New("ansiblejob is not coming up")
+				return fmt.Errorf("extra ansiblejob is created")
 			}
 
 			return nil
@@ -261,6 +251,76 @@ func forceUpdatePrehook(clt client.Client, preKey types.NamespacedName) func() e
 		return clt.Status().Update(context.TODO(), newPre)
 	}
 }
+
+var _ = Describe("given a subscription pointing to a git path without hook folders", func() {
+	var (
+		ctx    = context.TODO()
+		testNs = "normal-sub"
+		subKey = types.NamespacedName{Name: "t-sub", Namespace: testNs}
+		chnKey = types.NamespacedName{Name: "t-chn", Namespace: testNs}
+
+		chnIns = &chnv1.Channel{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      chnKey.Name,
+				Namespace: chnKey.Namespace,
+			},
+			Spec: chnv1.ChannelSpec{
+				Pathname: ansibleGitURL,
+				Type:     chnv1.ChannelTypeGit,
+			},
+		}
+
+		subIns = &subv1.Subscription{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      subKey.Name,
+				Namespace: subKey.Namespace,
+				Annotations: map[string]string{
+					subv1.AnnotationGitBranch: "release-2.0",
+					subv1.AnnotationGitPath:   "test/github/resources",
+				},
+			},
+			Spec: subv1.SubscriptionSpec{
+				Channel: chnKey.String(),
+				Placement: &plrv1alpha1.Placement{
+					GenericPlacementFields: plrv1alpha1.GenericPlacementFields{
+						Clusters: []plrv1alpha1.GenericClusterReference{
+							{Name: "test-cluster"},
+						},
+					},
+				},
+			},
+		}
+	)
+
+	It("should download the git to local and add deployables annotations to subscription", func() {
+		Expect(k8sClt.Create(ctx, chnIns.DeepCopy())).Should(Succeed())
+		Expect(k8sClt.Create(ctx, subIns)).Should(Succeed())
+
+		defer func() {
+			Expect(k8sClt.Delete(ctx, chnIns.DeepCopy())).Should(Succeed())
+			Expect(k8sClt.Delete(ctx, subIns)).Should(Succeed())
+		}()
+
+		waitForSubscription := func() error {
+			u := &subv1.Subscription{}
+
+			if err := k8sClt.Get(ctx, subKey, u); err != nil {
+				return fmt.Errorf("failed to get subscription %s, err: %s", subKey, err.Error())
+			}
+			fmt.Printf("izhang ======  u = %+v\n", u)
+
+			an := u.GetAnnotations()
+
+			if getCommitID(u) == "" || an[subv1.AnnotationDeployables] == "" || an[subv1.AnnotationTopo] == "" {
+				return fmt.Errorf("failed to get the commitID, deployables or topo annotation")
+			}
+
+			return nil
+		}
+
+		Eventually(waitForSubscription, specTimeOut, pullInterval).Should(Succeed())
+	})
+})
 
 var _ = Describe("given a subscription pointing to a git path,where pre hook folder present", func() {
 	var (
@@ -430,8 +490,6 @@ var _ = Describe("given a subscription pointing to a git path,where pre hook fol
 
 				u := &ansiblejob.AnsibleJob{}
 				_ = k8sClt.Get(context.TODO(), foundKey, u)
-
-				fmt.Printf("izhang ======  ansible = %+v\n", u)
 
 				return fmt.Errorf("failed to find the prehook %s in status", foundKey)
 			}
@@ -609,8 +667,6 @@ var _ = Describe("given a subscription pointing to a git path,where post hook fo
 						fmt.Printf("debug -----> list all the ansiblejob %v/%v\n", i.GetNamespace(), i.GetName())
 					}
 
-					fmt.Printf("izhang get sub %+v\n", u)
-
 					return errors.New("failed to regenerate ansiblejob upon the subscription changes")
 				}
 
@@ -658,6 +714,8 @@ var _ = Describe("given a subscription pointing to a git path,where post hook fo
 			}
 
 			a := u.GetAnnotations()
+			// this update will be override by the actual git commit id, so it
+			// wont create an extra ansiblejob instance
 			a[subv1.AnnotationGitCommit] = "update-from-test"
 			u.SetAnnotations(a)
 
@@ -672,9 +730,9 @@ var _ = Describe("given a subscription pointing to a git path,where post hook fo
 		Eventually(mockManagedCluster, specTimeOut, pullInterval).Should(Succeed())
 		Eventually(mockHostDpl, specTimeOut, pullInterval).Should(Succeed())
 
-		fmt.Println("\n3nd posthook should apply when the commit id of the subscription updated")
+		fmt.Println("\n3nd posthook should not apply when the commit id of the subscription annotation updated")
 		//normally it took around 5 reconcile to get the desired state
-		Eventually(waitForNthGenerateInstance(3), specTimeOut, pullInterval).Should(Succeed())
+		Eventually(waitForNthGenerateInstance(2), specTimeOut, pullInterval).Should(Succeed())
 
 		checkTopo := func() error {
 			u := &subv1.Subscription{}
@@ -689,6 +747,11 @@ var _ = Describe("given a subscription pointing to a git path,where post hook fo
 
 			if !strings.Contains(tStr, aSt) {
 				return fmt.Errorf("topo annotation is not updated")
+			}
+
+			dplAnn := u.GetAnnotations()[subv1.AnnotationDeployables]
+			if len(dplAnn) == 0 {
+				return fmt.Errorf("deployables annotation is missing")
 			}
 
 			return nil
@@ -794,10 +857,20 @@ var _ = Describe("given a subscription pointing to a git path,where both pre and
 				return errors.New("pre ansiblejob is not coming up")
 			}
 
+			u := &subv1.Subscription{}
+			if err := k8sClt.Get(ctx, subKey, u); err != nil {
+				return err
+			}
+
 			preHook := aList.Items[0].DeepCopy()
 
 			preHookKey.Name = preHook.GetName()
 			preHookKey.Namespace = preHook.GetNamespace()
+
+			if u.Status.AnsibleJobsStatus.LastPrehookJob != preHookKey.String() {
+				return fmt.Errorf("prehook is not wrote to the status while pending")
+			}
+
 			return nil
 		}
 
@@ -851,16 +924,14 @@ var _ = Describe("given a subscription pointing to a git path,where both pre and
 
 			updateStatus := updateSub.Status.AnsibleJobsStatus
 
-			dErr := fmt.Errorf("failed to get status %s", subKey)
-
 			if updateStatus.LastPrehookJob != preHookKey.String() ||
 				len(updateStatus.PrehookJobsHistory) == 0 {
-				return dErr
+				return fmt.Errorf("failed to get prehook status %s", subKey)
 			}
 
 			if updateStatus.LastPosthookJob != postHookKey.String() ||
 				len(updateStatus.PosthookJobsHistory) == 0 {
-				return dErr
+				return fmt.Errorf("failed to get posthook status %s", subKey)
 			}
 
 			return nil
